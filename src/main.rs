@@ -163,7 +163,7 @@ pub struct ConfigureArgs {
 fn parse_key_val(s: &str) -> Result<(String, String), anyhow::Error> {
     let pos = s
         .find('=')
-        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{}`", s))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
@@ -205,18 +205,15 @@ async fn run(cli: Cli) -> Result<()> {
         bail!("Error: no table URI provided.");
     };
 
-    let table = match &cli.storage_options {
-        Some(v) => {
-            let options = v.clone().into_iter().collect();
-            DeltaTable::try_from_url_with_storage_options(uri, options).await?
+    let table = if let Some(v) = &cli.storage_options {
+        let options = v.clone().into_iter().collect();
+        DeltaTable::try_from_url_with_storage_options(uri, options).await?
+    } else {
+        let mut builder = DeltaTableBuilder::from_url(uri)?;
+        if cli.no_files {
+            builder = builder.without_files();
         }
-        None => {
-            let mut builder = DeltaTableBuilder::from_url(uri)?;
-            if cli.no_files {
-                builder = builder.without_files();
-            }
-            builder.load().await?
-        }
+        builder.load().await?
     };
 
     match cli.cmd {
