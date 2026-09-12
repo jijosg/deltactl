@@ -1,7 +1,5 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
-#[cfg(feature = "datafusion")]
-use anyhow::bail;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use deltactl::delta;
 use deltalake::{DeltaTable, DeltaTableBuilder, DeltaTableError, table::builder::ensure_table_uri};
@@ -175,7 +173,7 @@ pub struct HistoryArgs {
     ///
     /// If no limit is specified, the command will fetch information for
     /// all commits in the table.
-    #[arg(long, short = 'l')]
+    #[arg(long, short = 'n')]
     limit: Option<usize>,
     /// Display one line per commit in the table history.
     #[arg(long)]
@@ -185,9 +183,6 @@ pub struct HistoryArgs {
 #[derive(Debug, Clone, Args)]
 pub struct HeadArgs {
     /// Limit number of rows to show.
-    ///
-    /// If no limit is specified, the command will fetch information for
-    /// all rows in the table.
     #[arg(long, short = 'n',value_parser = clap::value_parser!(u16).range(1..=100))]
     rows: Option<u16>,
 }
@@ -203,7 +198,7 @@ fn verify_uri(input: &str) -> Result<Url, DeltaTableError> {
     Ok(url)
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     // The URI is required to do anything meaningful, but `clap` doesn't
     // allow global and required options.
     let Some(uri) = cli.uri else {
