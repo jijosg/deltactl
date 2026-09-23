@@ -243,7 +243,7 @@ async fn run(cli: Cli) -> Result<()> {
             if cli.no_files {
                 bail!("Error: --no-files is incompatible with the head command.");
             }
-            delta::head(&table, args.rows).await?
+            delta::head(&table, args.rows).await?;
         }
     }
 

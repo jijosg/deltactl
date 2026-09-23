@@ -72,7 +72,7 @@ Authenticate with Azure CLI:
 
 ```sh
 deltactl details \
-  -o'use_azure_cli=true' \
+  -s'use_azure_cli=true' \
   --uri 'abfss://<container>@<account>.dfs.core.windows.net/<table_name>'
 ```
 
