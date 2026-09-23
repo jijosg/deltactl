@@ -1,10 +1,10 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
-
-use anyhow::{Context, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use deltactl::delta;
-use deltalake::{DeltaTableError, table::builder::ensure_table_uri};
+use deltalake::{DeltaTable, DeltaTableBuilder, DeltaTableError, table::builder::ensure_table_uri};
 use std::collections::HashMap;
+
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -21,16 +21,19 @@ struct Cli {
     /// The specific storage provider is derived from the table `uri`. The available options
     /// are documented for each supported provider in the `object_store` crate, and can
     /// be loaded from environment variables.
-    #[arg(long, short = 'o', number_of_values = 1, value_parser = parse_key_val)]
+    #[arg(long, short = 's', number_of_values = 1, value_parser = parse_key_val)]
     pub storage_options: Option<Vec<(String, String)>>,
+    /// Load the table without reading file metadata.
+    #[arg(long, short = 'f', global = true)]
+    pub no_files: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[cfg(feature = "optimize")]
+    #[cfg(feature = "datafusion")]
     /// Optimize a table with Compaction.
     Compact(CompactArgs),
-    #[cfg(feature = "optimize")]
+    #[cfg(feature = "datafusion")]
     /// Optimize a table with Z-Ordering.
     #[clap(name = "zorder")]
     ZOrder(ZOrderArgs),
@@ -62,6 +65,9 @@ enum Command {
     CanRW,
     /// Print the commit history for a table.
     History(HistoryArgs),
+    /// Print top 10 rows
+    #[cfg(feature = "datafusion")]
+    Head(HeadArgs),
 }
 
 #[derive(Debug, Args)]
@@ -81,18 +87,12 @@ struct ZOrderArgs {
 
 #[derive(Debug, Args)]
 struct OptimizeArgs {
-    /// Target file size (bytes).
+    /// Target file size (bytes). Must be greater than zero.
     #[arg(long)]
-    target_size: Option<u64>,
-    /// Max spill size (bytes).
-    #[arg(long)]
-    max_spill_size: Option<usize>,
+    target_size: Option<std::num::NonZeroU64>,
     /// Max number of concurrent tasks.
     #[arg(long)]
     max_concurrent_tasks: Option<usize>,
-    /// Whether to preserve insertion order within files.
-    #[arg(long)]
-    preserve_insertion_order: bool,
     /// Min commit interval; e.g. '2min'.
     ///
     /// Commit transaction incrementally, instead of a single commit.
@@ -101,14 +101,12 @@ struct OptimizeArgs {
     // TODO: Partition filters.
 }
 
-#[cfg(feature = "optimize")]
+#[cfg(feature = "datafusion")]
 impl From<OptimizeArgs> for delta::OptimizeOptions {
     fn from(value: OptimizeArgs) -> Self {
         Self {
             target_size: value.target_size,
-            max_spill_size: value.max_spill_size,
             max_concurrent_tasks: value.max_concurrent_tasks,
-            preserve_insertion_order: Some(value.preserve_insertion_order), // clap opt is a flag
             min_commit_interval: value.min_commit_interval.map(Into::into),
         }
     }
@@ -165,7 +163,7 @@ pub struct ConfigureArgs {
 fn parse_key_val(s: &str) -> Result<(String, String), anyhow::Error> {
     let pos = s
         .find('=')
-        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{}`", s))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
@@ -182,6 +180,13 @@ pub struct HistoryArgs {
     oneline: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct HeadArgs {
+    /// Limit number of rows to show.
+    #[arg(long, short = 'n',value_parser = clap::value_parser!(u16).range(1..=100))]
+    rows: Option<u16>,
+}
+
 fn verify_uri(input: &str) -> Result<Url, DeltaTableError> {
     #[cfg(feature = "azure")]
     deltalake::azure::register_handlers(None);
@@ -193,27 +198,30 @@ fn verify_uri(input: &str) -> Result<Url, DeltaTableError> {
     Ok(url)
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     // The URI is required to do anything meaningful, but `clap` doesn't
     // allow global and required options.
     let Some(uri) = cli.uri else {
         bail!("Error: no table URI provided.");
     };
 
-    let table = match &cli.storage_options {
-        Some(v) => {
-            let options = v.clone().into_iter().collect();
-            deltalake::open_table_with_storage_options(uri, options).await?
+    let table = if let Some(v) = &cli.storage_options {
+        let options = v.clone().into_iter().collect();
+        DeltaTable::try_from_url_with_storage_options(uri, options).await?
+    } else {
+        let mut builder = DeltaTableBuilder::from_url(uri)?;
+        if cli.no_files {
+            builder = builder.without_files();
         }
-        None => deltalake::open_table(uri).await?,
+        builder.load().await?
     };
 
     match cli.cmd {
-        #[cfg(feature = "optimize")]
+        #[cfg(feature = "datafusion")]
         Command::Compact(args) => {
             delta::compact(table, args.options.into()).await?;
         }
-        #[cfg(feature = "optimize")]
+        #[cfg(feature = "datafusion")]
         Command::ZOrder(args) => {
             delta::zorder(table, args.columns, args.options.into()).await?;
         }
@@ -230,6 +238,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Details => delta::details(&table).await?,
         Command::CanRW => delta::check_compatibility(table)?,
         Command::History(args) => delta::history(&table, args.limit, args.oneline).await?,
+        #[cfg(feature = "datafusion")]
+        Command::Head(args) => {
+            if cli.no_files {
+                bail!("Error: --no-files is incompatible with the head command.");
+            }
+            delta::head(&table, args.rows).await?;
+        }
     }
 
     Ok(())
